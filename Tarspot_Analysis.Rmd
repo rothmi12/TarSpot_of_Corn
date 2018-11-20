@@ -1,0 +1,494 @@
+---
+title: "Tarspot_analysis"
+author: "Mitch Roth"
+date: "11/19/2018"
+output: html_document
+---
+
+First, install and load packages that may be needed.
+##Install and Load Packages
+```{r}
+#source('http://bioconductor.org/biocLite.R')
+#biocLite('phyloseq')
+#packageVersion('phyloseq')
+#install.packages("ape")
+#install.packages("ecodist")
+#install.packages("vegan")
+#install.packages("ggplot2")
+#install.packages("indicspecies")
+#install.packages("ggpubr")
+#install.packages("gridExtra")
+#install.packages("devtools")
+library(phyloseq)
+library(ape)
+library(ecodist)
+library(vegan)
+library(ggplot2)
+library(indicspecies)
+library(ggpubr)
+library(gridExtra)
+library(devtools)
+```
+
+Now, let's import the files we need
+##Import files and convert to phyloseq
+```{r}
+theme_set(theme_bw())
+#input our OTU table
+tarspot_matrix = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/otu_table_ITS_UPARSE_R1.txt", header = T)
+tarspot_matrix
+```
+The matrix didn't seem to be imported in the correct format, so change the row and column names to a format that makes it compatible with phyloseq.
+```{r}
+#add row and column names to OTU table
+tarspot_matrix <- tarspot_matrix[order(tarspot_matrix$ID),]
+rownames(tarspot_matrix) <- tarspot_matrix$ID
+tarspot_matrix <- tarspot_matrix[,-1]
+tarspot_matrix
+```
+Now, repeat with importing the taxonomy table and formatting to phyloseq compatible format
+```{r}
+#input our taxonomy table
+tarspot_tax = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/consensus_taxonomy_phyllachora_Msorghi.txt", sep = "\t", header = T)
+tarspot_tax <- tarspot_tax[order(tarspot_tax$OTU),]
+rownames(tarspot_tax) <- tarspot_tax$OTU
+tarspot_tax <- tarspot_tax[,-1]
+#Turns out this needs to be a "matrix" not a "data.frame" for phyloseq
+tarspot_tax <- as.matrix(tarspot_tax)
+```
+Repeat for the master mapping file / metatdata file
+```{r}
+#Upload metadata file
+tarspot_map = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/TNF_map.txt", sep = "\t", header = T)
+tarspot_map <- tarspot_map[order(tarspot_map$Description),]
+tarspot_meta <- data.frame(tarspot_map$plate_number,tarspot_map$plant_status,tarspot_map$Description)
+colnames(tarspot_meta) <- c("plate_number", "plant_status", "Description")
+rownames(tarspot_meta) <- tarspot_meta$Description
+``` 
+Finally, convert these files into phyloseq objects
+```{r}
+#Turn OTU table and taxonomy table into phyloseq objects
+OTU <- otu_table(tarspot_matrix, taxa_are_rows = TRUE)
+TAX <- tax_table(tarspot_tax)
+META <- sample_data(tarspot_meta)
+#Merge them all into one phyloseq file
+tarspot_physeq <- phyloseq(OTU,TAX,META)
+nrow(tarspot_physeq@tax_table)
+nrow(tarspot_physeq@tax_table[tarspot_physeq@tax_table[,2]==""])
+nrow(tarspot_physeq@tax_table[tarspot_physeq@tax_table[,2]!=""])
+```
+Great, so it looks like we have a phyloseq object that contains:
+735 taxa in 47 samples
+47 samples with 3 sample variables
+735 taxa by 7 taxonomic ranks
+And, at least 608 have taxonomy assigned to Phylum level
+
+
+
+##Pruning
+Not all of the taxa will be informative, and some may be outliers and cause problems in the analysis. So, we'll filter / prune them out of the full data set for some analyses.
+```{r}
+tarspot_physeq
+#Filter out OTUS that don't appear > 5 times in at least 5% of the samples
+tarspot_filtered <- genefilter_sample(tarspot_physeq, filterfun_sample(function(x) x > 5),
+                                      A=.05*nsamples(tarspot_physeq))
+tarspot_pruned <- prune_taxa(tarspot_filtered, tarspot_physeq)
+tarspot_pruned <- transform_sample_counts(tarspot_pruned, function(x) 1E6 * x/sum(x))
+tarspot_pruned
+```
+So, removing OTUs low abundance (< 5) and are in fewer than 5% of samples reduces the number of taxa in our data set from 735 to 218. While this seems like a large reduction, I think it's a reasonably relaxed filtering strategy. Let's start exploring the data.
+
+##Alpha Diversity
+Let's check the alpha diversity of species within each lesion type using Shannon's index
+```{r}
+theme_set(theme_bw())
+p <- plot_richness(tarspot_physeq, x="plant_status", measures="Shannon") +
+  geom_boxplot()
+p
+```
+Using the full dataset (tarspot_physeq) and the pruned dataset (tarspot_pruned) yield very similar plots. They show that the Control and tar spot samples seem to have higher diversity measurements. Perhaps the lack of diversity among Fish eye samples is due to a higher abundance of necrotic tissues that make it harder for most species to survive and thrive here.
+
+Since the "no ethanol" controls match their respective lesion types, merge them in with their lesion typs and re-run the diversity plot
+```{r}
+alpha <- tarspot_pruned
+alpha@sam_data$plant_status <- as.character(alpha@sam_data$plant_status)
+alpha@sam_data$plant_status[alpha@sam_data$plant_status=="Tar spot no ethanol"] <- "Tar spot"
+alpha@sam_data$plant_status[alpha@sam_data$plant_status=="Fish eye no ethanol"] <- "Fish eye"
+alpha@sam_data$plant_status[alpha@sam_data$plant_status=="Control"] <- "Healthy"
+alpha@sam_data$plant_status <- as.factor(alpha@sam_data$plant_status)
+alpha@sam_data$plant_status <- relevel(alpha@sam_data$plant_status, "Healthy")
+p <- plot_richness(alpha, x="plant_status", measures="Shannon") +
+  geom_boxplot()
+p
+```
+Again, the full dataset and the pruned dataset yield very similar plots. The Shannon index still shows interesting differences between Fish eye symptoms and the others, so let's take a look at "richness" and "evenness", which are both parts of the Shannon index calculation.
+This idea / code is largely taken from: https://github.com/joey711/phyloseq/issues/945
+```{r}
+alpha_diversity <- estimate_richness(tarspot_physeq, measure = c("Shannon", "Observed"))
+H <- alpha_diversity$Shannon
+S1 <- alpha_diversity$Observed
+S <- log(S1)
+evenness <- H/S
+alpha_diversity$Evenness = evenness
+#Again, merge the "no ethanol" controls with their respective symptoms
+tarspot_meta$plant_status <- as.character(tarspot_meta$plant_status)
+tarspot_meta$plant_status[tarspot_meta$plant_status=="Tar spot no ethanol"] <- "Tar spot"
+tarspot_meta$plant_status[tarspot_meta$plant_status=="Fish eye no ethanol"] <- "Fish eye"
+tarspot_meta$plant_status[tarspot_meta$plant_status=="Control"] <- "Healthy"
+tarspot_meta$plant_status <- as.factor(tarspot_meta$plant_status)
+tarspot_meta$plant_status <- relevel(tarspot_meta$plant_status, "Healthy")
+
+#Make sure alpha_diversity file is in same order as the meta file so that it can be appended
+alpha_diversity <- alpha_diversity[order(row.names(alpha_diversity)),]
+identical(rownames(alpha_diversity), rownames(tarspot_meta))
+#Append the shannon data onto the metadata file
+tarspot_meta$Shannon <- alpha_diversity$Shannon
+tarspot_meta$Observed <- alpha_diversity$Observed
+tarspot_meta$Evenness <- alpha_diversity$Evenness
+PY <- levels(tarspot_meta$plant_status)
+PY.pairs <- combn(seq_along(PY), 2, simplify = FALSE, FUN = function(i)PY[i])
+
+pS <- ggplot(data=tarspot_meta, aes_string(x='plant_status', y='Shannon')) + 
+  geom_boxplot() + 
+  ylab("Shannon Index") + xlab("Lesion Type") +
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15)) +
+  stat_compare_means(comparisons = PY.pairs, label = "p.signif") + 
+  stat_compare_means(label.y = 0.8, size = 6)
+
+pO <- ggplot(data=tarspot_meta, aes_string(x='plant_status', y='Observed')) + 
+  geom_boxplot() + 
+  ylab("Observed Richness") + xlab("Lesion Type") +
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15)) +
+  stat_compare_means(comparisons = PY.pairs, label = "p.signif") + 
+  stat_compare_means(label.y = 110, size = 6)
+
+pE <- ggplot(data=tarspot_meta, aes_string(x='plant_status', y='Evenness')) + 
+  geom_boxplot() + 
+  ylab("Evenness") + xlab("Lesion Type") +
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15)) +
+  stat_compare_means(comparisons = PY.pairs, label = "p.signif",
+                     label.y.npc = "bottom") + 
+  stat_compare_means(label.y = 0.175, size = 6)
+
+grid.arrange(pS, pO, pE, ncol = 3)
+```
+So, overall it seems like the Fish eye lesions are associated with lower observed taxa (lower richness) and lower evenness. This indicates that Fish eye lesions are likely dominated by a single taxa, or small group of unique taxa, compared to Tar spot lesions and Healthy tissues. If that's the case, we can likely identify candidate taxa that are dominating in the Fish eye lesions. 
+
+Now let's look at taxa associated with each sample. At this point, there are far too many OTU's in the full dataset (tarspot_physeq), so use the pruned dataset (tarspot_pruned), which is also normalized to the sample with the lowest read depth.
+```{r}
+#Bar charts by taxonomy level
+p1 <- plot_bar(tarspot_pruned, fill = "Genus")
+p1
+```
+Interestingly, it looks like Phyllachora is present in all lesioned samples, but most abundant in Fish eye lesions, and ~less abundant in Tar spot lesions. Pool all of the samples by lesion type and plot this again.
+```{r}
+pooled_pruned <- tarspot_pruned
+pooled_pruned@sam_data$plant_status <- as.character(pooled_pruned@sam_data$plant_status)
+pooled_pruned@sam_data$plant_status[pooled_pruned@sam_data$plant_status=="Tar spot no ethanol"] <- "Tar spot"
+pooled_pruned@sam_data$plant_status[pooled_pruned@sam_data$plant_status=="Fish eye no ethanol"] <- "Fish eye"
+pooled_pruned@sam_data$plant_status[pooled_pruned@sam_data$plant_status=="Control"] <- "Healthy"
+pooled_pruned@sam_data$plant_status <- as.factor(pooled_pruned@sam_data$plant_status)
+pooled_pruned@sam_data$plant_status <- relevel(pooled_pruned@sam_data$plant_status, "Healthy")
+#Bar charts by taxonomy level
+p1 <- plot_bar(pooled_pruned, "plant_status", fill = "Genus") +
+  scale_color_discrete(name="Lesion Type") + 
+  xlab("Lesion Type") +
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15),
+        legend.title = element_text(face="bold", size = 20),
+        legend.text = element_text(face="bold", size = 20),
+        legend.key.size = unit(2, 'lines'),
+        legend.position = "none")
+p1
+```
+It's a bit harder to make sense of this plot, but it sort of confirms what the alpha diversity analysis shows - Fish eye lesions have fewer, larger blocks of species while Tar spot lesions have more, smaller blocks of species, indicating more diversity. Of note, the Fusarium and Nigrospora(?) blocks are larger in the Fish eye lesions.
+
+Let's see if the communities for each type of lesion are different by running a PERMANOVA on the distance matrix, as a function of lesion type. 
+```{r}
+tarspot_physeq@sam_data$plant_status <- as.character(tarspot_physeq@sam_data$plant_status)
+tarspot_physeq@sam_data$plant_status[tarspot_physeq@sam_data$plant_status=="Tar spot no ethanol"] <- "Tar spot"
+tarspot_physeq@sam_data$plant_status[tarspot_physeq@sam_data$plant_status=="Fish eye no ethanol"] <- "Fish eye"
+tarspot_physeq@sam_data$plant_status[tarspot_physeq@sam_data$plant_status=="Control"] <- "Healthy"
+tarspot_physeq@sam_data$plant_status <- as.factor(tarspot_physeq@sam_data$plant_status)
+tarspot_physeq@sam_data$plant_status <- relevel(tarspot_physeq@sam_data$plant_status, "Healthy")
+#Calculate distance matrix
+tarspot_dist <- phyloseq::distance(tarspot_physeq, method = "bray")
+#Create a list of lesion types
+lesion_type <- tarspot_physeq@sam_data$plant_status
+#Run PERMNAOVA
+adonis(tarspot_dist ~ lesion_type)
+#Post hoc test for PERMANOVA
+p.hoc <- betadisper(tarspot_dist, lesion_type)
+TukeyHSD(p.hoc)
+```
+Great! Lesion types have significantly different communities according to PERMANOVA (adonis). The betadisper function can be used to assess beta diversity, and the Tukey test indicates that the Fish eye community is significantly different from the Tar spot community. 
+
+##Ordination plots
+Since this is a large dataset, it helps to look at the data with ordination methods, calculated by different distance metrics. So, let's generate a PCoA plot to visualize these communities. Let's use bray-curtis distances, as these are commonly used in ecological data. Since we'll want to explore taxa associated with each lesion type, we'll have to use the pruned dataset, or else the plots get too messy.
+```{r}
+tarspot_ord <- ordinate(pooled_pruned, "PCoA", "bray")
+#PCoA plot
+p2 <- plot_ordination(pooled_pruned, tarspot_ord, 
+                     type="sample", color="plant_status", shape="plant_status") + 
+  geom_point(size=5) + 
+  stat_ellipse(level = 0.95) + 
+  scale_shape_discrete(name="Lesion Type") + 
+  scale_color_discrete(name="Lesion Type") + 
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15),
+        legend.title = element_text(face="bold", size = 20),
+        legend.text = element_text(face="bold", size = 20),
+        legend.key.size = unit(2, 'lines'))
+  
+p2
+
+
+```
+Great, it looks like Fish eye and Tar spot separate into unique groups based on their fungal communities, which is what we expect after the PERMANOVA results above. Interestingly, the Healthy control samples are somewhere between the two lesion types, but according to the TukeyHSD test above, it is not significantly different from either lesion type. Let's see if we can identify specific taxa associated with each lesion type, again using the pruned dataset.
+
+```{r}
+tarspot_ord <- ordinate(pooled_pruned, "PCoA", "bray")
+pooled_pruned@sam_data$plant_status <- ordered(pooled_pruned@sam_data$plant_status, 
+                           levels = c("Healthy", "Fish eye", "Tar spot", "Taxa"))
+pOTU <- plot_ordination(pooled_pruned, tarspot_ord, 
+                     type="taxa", 
+                     color="Phylum",
+                     justDF = T)
+pOTU$OTU <- rownames(pOTU)
+
+for (i in seq_along(pOTU$OTU)){
+  if (pOTU[i,8] == "Phyllachora"){
+    pOTU[i,11] <- c("Phyllachora")
+  }
+  else if (pOTU[i,8] == "Monographella"){
+    pOTU[i,11] <- c("Microdochium")
+  }
+  else if (pOTU[i,8] == "Microdochium"){
+    pOTU[i,11] <- "Microdochium"
+  }
+  else {
+    pOTU[i,11] <- "NA"
+  }
+}
+
+#For coloring purposes, may want to have certain OTUs colored
+#Ignore this for now
+#pOTU["OTU_33",11] <- c("Interest")
+#pOTU["OTU_2",11] <- c("Interest")
+#pOTU["OTU_124",11] <- c("Interest")
+#pOTU["OTU_91",11] <- c("Interest")
+#pOTU["OTU_233",11] <- c("Interest")
+#pOTU["OTU_136",11] <- c("Interest")
+#pOTU$V11
+#tar_samples <- pSample[pSample$plant_status!="Taxa",]
+#tar_taxa <- pSample[pSample$plant_status=="Taxa",]
+#ar_taxa[tar_taxa$Genus=="Microdochium",]
+#plot_labels <- tar_taxa
+#plot_labels$label <- NA
+#for (i in seq_along(tar_taxa$Genus)){
+#  if (tar_taxa[i,9] == "Phyllachora"){
+#    plot_labels[i,14] <- c("Phyllachora")
+#  }
+#  else if (tar_taxa[i,9] == "Monographella"){
+#    plot_labels[i,14] <- c("Monographella")
+#  }
+#  else if (tar_taxa[i,9] == "Microdochium"){
+#    plot_labels[i,14] <- "Monographella"
+#  }
+#  else {
+#    plot_labels[i,14] <- NA
+#  }
+#}
+#plot_labels$label <- as.factor(plot_labels$label)
+#plot_labels <- plot_labels[,-11]
+#plot_labels <- plot_labels[,-12]
+#plot_labels <- na.omit(plot_labels)
+
+pSample <- plot_ordination(pooled_pruned, tarspot_ord, 
+                     type="sample", 
+                     shape="plant_status",
+                     color="plant_status",
+                     justDF = T)
+
+  
+
+pSample$plant_status <- ordered(pSample$plant_status, 
+                           levels = c("Healthy", "Fish eye", "Tar spot"))
+
+p4 <- ggplot() + 
+  geom_point(data = pOTU, size = 3, aes(x=Axis.1, y=Axis.2, shape = V11)) + 
+  geom_point(data = pSample, size = 5,
+             aes(x=Axis.1, y=Axis.2, 
+                color = plant_status)) +
+  stat_ellipse(data = pSample, aes(x=Axis.1, y=Axis.2, color = plant_status),
+               level = 0.95) +
+  scale_shape_discrete(name="Lesion Type") + 
+  scale_color_discrete(name="Lesion Type") + 
+  xlab("Axis 1 [41.5%]") + ylab("Axis 2 [18.7%]") +
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15),
+        #legend.title = element_text(face="bold", size = 20),
+        #legend.text = element_text(face="bold", size = 20),
+        #legend.key.size = unit(2, 'lines')
+        legend.position="none"
+        )
+p4
+
+p5 <- ggplot() + 
+  geom_point(data = pOTU, color = "white", aes(x=Axis.1, y=Axis.2)) + 
+  geom_point(data = pSample, size = 5, color = "white",
+             aes(x=Axis.1, y=Axis.2)) +
+  stat_ellipse(data = pSample, aes(x=Axis.1, y=Axis.2, color = plant_status),
+               level = 0.95) +
+  scale_shape_discrete(name="Lesion Type") + 
+  scale_color_discrete(name="Lesion Type") + 
+  geom_text(data = pOTU, aes(x=Axis.1, y=Axis.2, label=OTU, color = Genus)) +
+  xlab("Axis 1 [41.5%]") + ylab("Axis 2 [18.7%]") +
+  theme(axis.title.x = element_text(face="bold", size = 20),
+        axis.title.y = element_text(face="bold", size = 20),
+        axis.text = element_text(face="bold", size = 15),
+        #legend.title = element_text(face="bold", size = 20),
+        #legend.text = element_text(face="bold", size = 20),
+        #legend.key.size = unit(2, 'lines')
+        legend.position="none"
+        )
+
+p5
+grid.arrange(p4,p5, ncol = 2)
+```
+Neat! So now we can see that there are specific OTUs associated with Fish eye lesions, perhaps driving the symptoms we see. Let's find ou what some of these are.
+```{r}
+pOTU[pOTU$OTU=="OTU_2",]
+pOTU[pOTU$OTU=="OTU_20",]
+pOTU[pOTU$OTU=="OTU_33",]
+pOTU[pOTU$OTU=="OTU_84",]
+pOTU[pOTU$OTU=="OTU_91",]
+pOTU[pOTU$OTU=="OTU_100",]
+pOTU[pOTU$OTU=="OTU_124",]
+pOTU[pOTU$OTU=="OTU_136",]
+pOTU[pOTU$OTU=="OTU_151",]
+pOTU[pOTU$OTU=="OTU_170",]
+pOTU[pOTU$OTU=="OTU_194",]
+pOTU[pOTU$OTU=="OTU_233",]
+pOTU[pOTU$OTU=="OTU_571",]
+```
+So it looks like of the 13 examined, only 4 of them have a species ID:
+Colletotrichum graminicola
+Leptospora rubella
+Phaeosphaeria juncicola
+Curvularia sp.
+The rest have classifications only down to Order or Family
+Take these OTU's and BLAST them in NCBI to see if we can get a more accurate idea of what these species are.
+
+
+###Indicator species analysis
+Indicator species analysis looks for significant associations with taxa / OTUs and a group. In our case, we'll group by lesion type, and we'll use the whole dataset instead of the pruned one. 
+```{r}
+indicator.dist1 <- indicspecies::multipatt(as.data.frame(t(tarspot_physeq@otu_table)), cluster = tarspot_physeq@sam_data$plant_status, duleg = T)
+summary(indicator.dist1)
+```
+So the whole data set says there are 54 species indicative of "Healthy", 8 indicative of Fish eye, and 23 indicative of Tar spot.
+The 8 indicative of Fish eye are:
+OTU_2
+OTU_262
+OTU_7
+OTU_6
+OTU_33
+OTU_1
+OTU_207
+OTU_18
+
+Let's see what the pruned data file tells us for indicator species
+```{r}
+indic_df <- as.data.frame(t(pooled_pruned@otu_table))
+#Note, need to make sure the row names in indic_df match their respective lesion type, or else it won't cluster correctly.
+indic_df$lesion <- c("Tar spot",
+                        "Fish eye",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Tar spot",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Tar spot",
+                        "Fish eye",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Fish eye",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Tar spot",
+                        "Fish eye",
+                        "Fish eye",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Tar spot",
+                        "Tar spot",
+                        "Fish eye",
+                        "Tar spot",
+                        "Healthy",
+                        "Healthy",
+                        "Healthy")
+indic_df$lesion <- as.factor(indic_df$lesion)
+indicator.dist <- indicspecies::multipatt(as.data.frame(t(pooled_pruned@otu_table)), cluster = indic_df$lesion, duleg = T)
+summary(indicator.dist)
+```
+The pruned dataset is telling a similar story, with 53 indicative of Healthy, 6 indicative of Fish eye, and 16 indicative of Tar spot lesions.
+The 6 indicative of Fish eye are:
+OTU_2
+OTU_262
+OTU_33
+OTU_207
+OTU_1
+OTU_18
+The only two missing from the full data set are OTU_7 and OTU_6
+
+Let's see what all of these species actually are.
+```{r}
+rare.otu <- as.data.frame(tarspot_indic@tax_table)
+rare.otu$otu <- rownames(rare.otu)
+indicator.tax <- rare.otu[rare.otu$otu == "OTU_2",]
+indicator.tax[2,] <- rare.otu[rare.otu$otu == "OTU_262",]
+indicator.tax[3,] <- rare.otu[rare.otu$otu == "OTU_33",]
+indicator.tax[4,] <- rare.otu[rare.otu$otu == "OTU_207",]
+indicator.tax[5,] <- rare.otu[rare.otu$otu == "OTU_1",]
+indicator.tax[6,] <- rare.otu[rare.otu$otu == "OTU_8",]
+indicator.tax[7,] <- rare.otu[rare.otu$otu == "OTU_7",]
+indicator.tax[8,] <- rare.otu[rare.otu$otu == "OTU_6",]
+
+indicator.tax
+```
+Along with BLAST data, three species indicative of Fish eye are actually Phyllachora maydis (OTU_262, OTU_33 from BLAST, OTU_1). Another one (OTU_207) is also likely P. maydis, as it is classified to the Order Phyllachorales. The others are a Fungus (OTU_2), an Ascomycete (OTU_8), a Fusarium sp. (OTU_7), and a Paraphaeosphaeria species (OTU_6).
+
+I'm begining to wonder if there are isolates of P. maydis that are capable of causing fish eye lesions, and other isolates that cannot. Almost like a race thing. And the Phyllachora "indicator species" of Fish eye lesions are actually indicating a race / pathovar that is capable of causing the fish eye lesions on its own?
+
+
