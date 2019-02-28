@@ -16,3 +16,5 @@ In order to analyze this data, you will need 3 files:
 3) TNF_map.txt
 
 Save them wherever you want, and change the path to where you saved them so that R can find them.
+
+All bioinformatic pipelines used prior to analysis can be found at: https://github.com/Gian77/Students_PLP847_2018
