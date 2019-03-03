@@ -1,0 +1,624 @@
+---
+title: "Network Analysis"
+author: "Mitch Roth, Zach Noel"
+date: "12/19/2018"
+output: html_document
+---
+
+##Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#source('http://bioconductor.org/biocLite.R')
+#biocLite('phyloseq')
+#packageVersion('phyloseq')
+#library(phyloseq)
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+ #   install.packages("BiocManager")
+#BiocManager::install("microbiome", version = "3.8")
+#library(microbiome)
+#library(devtools)
+#devtools::install_github("benjjneb/decontam")
+#library(decontam)
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+ #   install.packages("BiocManager")
+#BiocManager::install("RCy3", version = "3.8")
+#install.packages("magrittr")
+
+
+################################################################
+# Un-commment this function to load / install necessary packages
+################################################################
+#ipak <- function(pkg){
+#new.pkg <- pkg[!(pkg %in% installed.packages()[,"Package"])]
+#if (length(new.pkg)) 
+#    install.packages(new.pkg, dependencies = TRUE)
+#sapply(pkg, require, character.only = TRUE)
+#}
+
+#Here are the packages you'll need
+packages <- c("biomformat", "qiimer", "MASS", "ape", "ggplot2", "plyr", "indicspecies", "labdsv", "dplyr", "reshape", "vegan", "metacoder", "DESeq2", "emmeans", "ggpmisc", "ggpubr", "tidyverse", "doParallel", "DT", "exactRankTests", "foreach", "Rcpp", "shiny", "coin", "microbiome", "ggsci", "phyloseq", "devtools", "decontam", "cowplot", "lme4", "ancom.R", "ggforce", "ggrepel", "venn", "exactRankTests", "nlme", "SpiecEasi", "RCy3", "igraph")
+
+#Run the function from above
+#ipak(packages)
+
+packageVersion("vegan")
+packageVersion('phyloseq')
+packageVersion('indicspecies')
+#library(vegan, lib.loc = "/Library/Frameworks/R.framework/Versions/3.3/Resources/library")
+
+#For knitting's sake, have to have them load manually
+lapply(packages, require, character.only = TRUE)
+```
+read in data
+```{r}
+#OTU  
+tarspot_matrix = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/otu_table_ITS_UPARSE_R1.txt", header = T)
+tarspot_matrix
+
+#add row and column names to OTU table
+tarspot_matrix <- tarspot_matrix[order(tarspot_matrix$ID),]
+rownames(tarspot_matrix) <- tarspot_matrix$ID
+tarspot_matrix <- tarspot_matrix[,-1]
+tarspot_matrix
+
+#TAX
+#input our taxonomy table
+tarspot_tax = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/consensus_taxonomy_phyllachora_Msorghi.txt", sep = "\t", header = T)
+tarspot_tax <- tarspot_tax[order(tarspot_tax$OTU),]
+rownames(tarspot_tax) <- tarspot_tax$OTU
+tarspot_tax <- tarspot_tax[,-1]
+#Turns out this needs to be a "matrix" not a "data.frame" for phyloseq
+tarspot_tax <- as.matrix(tarspot_tax)
+
+#SAMP
+
+#Upload metadata file
+tarspot_map = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/TNF_map.txt", sep = "\t", header = T)
+tarspot_map <- tarspot_map[order(tarspot_map$Description),]
+tarspot_meta <- data.frame(tarspot_map$plate_number,tarspot_map$plant_status,tarspot_map$Description)
+colnames(tarspot_meta) <- c("plate_number", "plant_status", "Description")
+rownames(tarspot_meta) <- tarspot_meta$Description
+```
+
+```{r}
+tarspot_matrix = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/otu_table_ITS_UPARSE_R1.txt", header = T)
+tarspot_matrix <- tarspot_matrix[order(tarspot_matrix$ID),]
+rownames(tarspot_matrix) <- tarspot_matrix$ID
+tarspot_matrix <- tarspot_matrix[,-1]
+
+tarspot_tax = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/consensus_taxonomy_phyllachora_Msorghi.txt", sep = "\t", header = T)
+tarspot_tax <- tarspot_tax[order(tarspot_tax$OTU),]
+rownames(tarspot_tax) <- tarspot_tax$OTU
+tarspot_tax <- tarspot_tax[,-1]
+tarspot_tax <- as.matrix(tarspot_tax)
+
+tarspot_map = read.table("/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/data_files/TNF_map.txt", sep = "\t", header = T)
+tarspot_map <- tarspot_map[order(tarspot_map$Description),]
+tarspot_meta <- data.frame(tarspot_map$plate_number,tarspot_map$plant_status,tarspot_map$Description)
+colnames(tarspot_meta) <- c("plate_number", "plant_status", "Description")
+rownames(tarspot_meta) <- tarspot_meta$Description
+
+#Turn OTU table and taxonomy table into phyloseq objects
+OTU <- otu_table(tarspot_matrix, taxa_are_rows = TRUE)
+TAX <- tax_table(tarspot_tax)
+META <- sample_data(tarspot_meta)
+#Merge them all into one phyloseq file
+tarspot_physeq <- phyloseq(OTU,TAX,META)
+nrow(tarspot_physeq@tax_table)
+nrow(tarspot_physeq@tax_table[tarspot_physeq@tax_table[,2]==""])
+nrow(tarspot_physeq@tax_table[tarspot_physeq@tax_table[,2]!=""])
+```
+
+Check to make sure everything is fungi only
+```{r}
+tarspot_fungi <- subset_taxa(tarspot_physeq, Phylum !="Cercozoa")
+# No Cercozoa. 
+```
+
+##Low reads samples
+Lets look at the otu table to see if particular samples did not sequence well 
+```{r Sequence reads}
+sample.reads <- data.frame(colSums(tarspot_fungi@otu_table)); colnames(sample.reads) <- "num_reads"
+sample.reads$samples <- rownames(sample.reads)
+print(sample.reads)
+```
+Looks fine
+
+Total number of reads analysed
+```{r}
+sum(taxa_sums(tarspot_fungi)) #5 million reads
+```
+
+```{r}
+tarspot_fungi@sam_data$plant_status <- as.character(tarspot_fungi@sam_data$plant_status)
+tarspot_fungi@sam_data$plant_status[tarspot_fungi@sam_data$plant_status=="Tar spot no ethanol"] <- "Tar spot"
+tarspot_fungi@sam_data$plant_status[tarspot_fungi@sam_data$plant_status=="Fish eye no ethanol"] <- "Fish eye"
+```
+
+Filter for network analysis 
+```{r}
+tarspot_fungi_filter <- tarspot_fungi %>%
+  subset_samples(plant_status != "Control") 
+```
+
+Filter for fish eye
+```{r}
+#tarspot_fungi_filter_tar <- tarspot_fungi_filter %>%
+#  subset_samples(plant_status != "Fish eye") %>%
+#  filter_taxa(., function(x) sum(x > 2) > (0.2*length(x)), TRUE)
+
+# Filtering used in Karen Garret's phytopathology publication https://apsjournals.apsnet.org/doi/abs/10.1094/PHYTO-02-16-0058-FI
+tarspot_fungi_filter_tar <- tarspot_fungi_filter %>%
+  phyloseq::subset_samples(plant_status != "Fish eye") %>%
+  phyloseq::filter_taxa(., function(x) sum(x > 5) > (.05*length(x)), TRUE)
+
+#Add 8th column with lowest level of taxonomy identified
+tax.df <- as.data.frame(tarspot_fungi_filter_tar@tax_table)
+tax.df[,1] <- as.character(tax.df[,1])
+tax.df[,2] <- as.character(tax.df[,2])
+tax.df[,3] <- as.character(tax.df[,3])
+tax.df[,4] <- as.character(tax.df[,4])
+tax.df[,5] <- as.character(tax.df[,5])
+tax.df[,6] <- as.character(tax.df[,6])
+tax.df[,7] <- as.character(tax.df[,7])
+tax.df[,8] <- NA
+
+for (i in 1:nrow(tax.df)){
+  if (tax.df[i,2]==""){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,1])
+  }
+  else if (tax.df[i,3]==""){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,2]) 
+  }
+  else if (tax.df[i,4]==""){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,3])
+  }
+  else if (tax.df[i,5]==""){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,4]) 
+  }
+  else if (tax.df[i,6]==""){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,5])
+  }
+  else if (tax.df[i,7]==""){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,6])
+  }
+  else {
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), tax.df[i,7])
+  }
+}
+tax.df[,8]
+
+#Manually change the 3 Dothidiomycetes that were misclassified
+miss.class <- c("OTU_33","OTU_46","OTU_97")
+for (i in 1:length(tax.df[,8])){
+  if (rownames(tax.df[i,]) %in% miss.class){
+    tax.df[i,8] <- paste(rownames(tax.df[i,]), "Phyllachora maydis")
+  }
+}
+
+#Put tax.df back into tarspot_fungi_filter_tar@tax_table
+tax.df <- as.matrix(tax.df)
+tax.df <- tax_table(tax.df)
+tarspot_fungi_filter_tar@tax_table <- tax.df
+colnames(tarspot_fungi_filter_tar@tax_table) <- c("Kingdom",
+                                                  "Phylum",
+                                                  "Class",
+                                                  "Order",
+                                                  "Family",
+                                                  "Genus",
+                                                  "Species",
+                                                  "Taxonomy")
+```
+
+```{r}
+tar_speac <- spiec.easi(tarspot_fungi_filter_tar, 
+                        method='mb',
+                        lambda.min.ratio=0.01,
+                        nlambda=30, 
+                        pulsar.params=list(rep.num=100))
+
+tar_net <- adj2igraph(getRefit(tar_speac),  vertex.attr=list(name=taxa_names(tarspot_fungi_filter_tar)))
+
+# Identify isolated nodes
+bad.vs<-V(tar_net)[degree(tar_net) == 0] 
+# Remove isolated nodes
+tar_net2<-delete.vertices(tar_net, bad.vs)
+
+plot_network(tar_net2, tarspot_fungi_filter_tar, type='taxa', color="Order", label = "Taxonomy")
+
+edge_density(tar_net2, loops = FALSE)
+
+net.grph <- tar_net2
+
+# Hub detection
+net.cn <- closeness(net.grph)
+net.bn <- betweenness(net.grph) 
+net.pr <- page_rank(net.grph)$vector 
+net.hs <- hub_score(net.grph)$vector
+
+net.dg <- degree(net.grph)
+length(net.dg) #216 taxa in the actual network
+hubs <- data.frame(hub_score(net.grph)$vector); colnames(hubs) <- c("hubscore")
+hubs$OTU <- rownames(hubs)
+hubs$betweeness <- net.bn
+hubs$pr <- net.pr
+hubs$degree <- net.dg
+hubs$closness <- net.cn
+hubs$eigen <- eigen_centrality(net.grph)$vector
+
+all.equal(hubs$hubscore, hubs$eigen) # they are the same
+
+# getting the mean relative abundance of each OTU
+myphy.site.year.relative <- tarspot_fungi_filter_tar %>%   
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  arrange(OTU)
+mean.rel.abund <- myphy.site.year.relative %>% 
+  group_by(OTU) %>% 
+  nest() %>%
+  mutate(mean.relabund = purrr::map(data,~mean(.$Abundance*100))) %>%
+  mutate(SE.relabund = purrr::map(data,~sd(.$Abundance*100)/sqrt(length(.$Abundance*100)))) %>%
+  unnest(mean.relabund, SE.relabund)
+
+nodes.stats <- hubs
+nodes.stats$mean.abundance <- mean.rel.abund$mean.relabund[match(nodes.stats$OTU, mean.rel.abund$OTU)]
+nodes.stats$Genus <- myphy.site.year.relative$Genus[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+nodes.stats$Order <- myphy.site.year.relative$Order[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+nodes.stats$Taxonomy <- myphy.site.year.relative$Taxonomy[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+nodes.stats$Label <- myphy.site.year.relative$Label[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+
+# I am going to call our "hub-lines" or define our cutoffs based on https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.1002352
+mean.close <- mean(log10(nodes.stats$closness))
+sd.close <- sd(log10(nodes.stats$closness))
+hubline.close <- (mean.close + 1.282*sd.close)
+
+z.score.close = (hubline.close - mean.close)/sd.close
+pnorm(z.score.close) # line is above 95 % - equal to p = 0.05
+
+mean.degree <- mean(log10(nodes.stats$degree))
+sd.degree <- sd(log10(nodes.stats$degree))
+hubline.degree <- (mean.degree + 1.65*sd.degree)
+
+z.score.degree = (hubline.degree - mean.degree)/sd.degree
+pnorm(z.score.degree) # line is above 95 % - equal to p = 0.05
+
+mean.between <- mean(log10(nodes.stats$betweeness[nodes.stats$betweeness > 0]))
+sd.between <- sd(log10(nodes.stats$betweeness[nodes.stats$betweeness > 0]))
+hubline.between <- (mean.between + 1.65*sd.between)
+
+z.score.between = (hubline.between - mean.between)/sd.between
+pnorm(z.score.between) # line is above 95 % - equal to p = 0.05
+
+hist(log10(hubs$eigen + 0.0001)) # looks normal enough
+mean.eigen <- mean(log10(nodes.stats$eigen+0.0001))
+sd.eigen <- sd(log10(nodes.stats$eigen+0.0001))
+hubline.eigen <- (mean.eigen + 1.65*sd.eigen)
+
+z.score.eigen = (hubline.eigen - mean.eigen)/sd.eigen
+pnorm(z.score.eigen) # line is above 95 % - equal to p = 0.05
+
+between <- ggplot() + 
+  geom_point(data = nodes.stats, aes(size = mean.abundance, x = betweeness, y = degree), alpha = 0.6) +
+  scale_size_continuous(name = "Relative Abundance") +
+  theme_bw() + 
+  geom_text_repel(data = subset(nodes.stats, betweeness > 10^hubline.between & degree > 10^hubline.degree), aes(x = betweeness, y = degree, label = Taxonomy)) +
+  geom_text_repel(data = subset(nodes.stats, betweeness > 10^hubline.between & degree < 10^hubline.degree), aes(x = betweeness, y = degree, label = Taxonomy)) +
+  xlab("Betweeness Centrality") + 
+  ylab("Degree") +
+  geom_vline(xintercept = 10^hubline.between) + 
+  geom_hline(yintercept = 10^hubline.degree)
+
+# the cutoff with hubscore was just arbitrary since we dont really have a correct distribution. 
+hubscore <- ggplot() + 
+  geom_point(data = nodes.stats, aes(size = mean.abundance, x = hubscore, y = degree), alpha = 0.6) +
+  scale_size_continuous(name = "Relative Abundance") +
+  theme_bw() + 
+  geom_text_repel(data = subset(nodes.stats, eigen > 10^hubline.eigen & degree > 10^hubline.degree), aes(x = eigen, y = degree, label = Taxonomy)) +
+  geom_text_repel(data = subset(nodes.stats, eigen > 10^hubline.eigen & degree < 10^hubline.degree), aes(x = eigen, y = degree, label = Taxonomy)) +
+  xlab("Eigenvector Centrality") + 
+  ylab("Degree") +
+  geom_vline(xintercept = 10^hubline.eigen) + 
+  geom_hline(yintercept = 10^hubline.degree)
+# call hubs based on OTUs with high between centrality and high hubscores. 
+
+plot_grid(between, hubscore, labels = NULL, nrow = 2)
+
+# Get clusters
+wt <- walktrap.community(net.grph)
+# Calculate modularity
+modu <- modularity(net.grph, membership(wt))
+
+components(net.grph, mode = c("strong"))
+```
+
+Open a cytoscape network
+```{r}
+net.grph <- tar_net2
+#createNetworkFromIgraph(net.grph,"tar_net")
+```
+
+```{r}
+#Node stats - import this first.
+write.csv(nodes.stats, "/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/Network\ Analysis/NodeStats_tar_net.csv")
+```
+ 
+Calculate edge weight == higher absolute value = stronger co-occurance
+```{r}
+### add pos-neg to table
+betaMat=as.matrix(symBeta(getOptBeta(tar_speac)))
+otu.ids=colnames(tar_speac$est$data)
+edges=E(net.grph)
+edge.stats <- NULL
+for(e.index in 1:length(edges)){
+  adj.nodes=ends(net.grph,edges[e.index])
+  xindex=which(otu.ids==adj.nodes[1])
+  yindex=which(otu.ids==adj.nodes[2])
+  beta=betaMat[xindex,yindex]
+  wt_i <- cbind.data.frame(adj.nodes, beta)
+  colnames(wt_i) <- c("source", "target", "beta")
+  edge.stats <- rbind.data.frame(wt_i, edge.stats)
+}
+
+edge.stats$direction <- ifelse(edge.stats$beta > 0, "Positive", "Negative")
+edge.stats$shared.name <- paste(edge.stats$source, "(interacts with)", edge.stats$target)
+edge.stats$abs.beta <- abs(edge.stats$beta)
+prop.edges.tar <- edge.stats %>%
+  group_by(direction) %>%
+  summarise(counts = n()) %>%
+  select(direction, counts)
+prop.edges.tar$prop <- 100*prop.edges.tar$counts/sum(prop.edges.tar$counts)
+prop.edges.tar$category <- "Tar Spot"
+
+```
+
+Write edge stats to a file
+```{r}
+#Node stats - import this first.
+write.csv(edge.stats, "/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/Network\ Analysis/EdgeStats_tar_net.csv")
+```
+
+Fish-eye symptoms network
+
+Same filtering and settings as above for the tar-spot lesions
+```{r}
+tarspot_fungi_filter_fish <- tarspot_fungi_filter %>%
+  phyloseq::subset_samples(plant_status != "Tar spot") %>%
+  phyloseq::filter_taxa(., function(x) sum(x > 5) > (.05*length(x)), TRUE)
+
+tax.df2 <- as.data.frame(tarspot_fungi_filter_fish@tax_table)
+tax.df2[,1] <- as.character(tax.df2[,1])
+tax.df2[,2] <- as.character(tax.df2[,2])
+tax.df2[,3] <- as.character(tax.df2[,3])
+tax.df2[,4] <- as.character(tax.df2[,4])
+tax.df2[,5] <- as.character(tax.df2[,5])
+tax.df2[,6] <- as.character(tax.df2[,6])
+tax.df2[,7] <- as.character(tax.df2[,7])
+tax.df2[,8] <- NA
+for (i in 1:nrow(tax.df2)){
+  if (tax.df2[i,2]==""){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,1])
+  }
+  else if (tax.df2[i,3]==""){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,2]) 
+  }
+  else if (tax.df2[i,4]==""){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,3])
+  }
+  else if (tax.df2[i,5]==""){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,4]) 
+  }
+  else if (tax.df2[i,6]==""){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,5])
+  }
+  else if (tax.df2[i,7]==""){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,6])
+  }
+  else {
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), tax.df2[i,7])
+  }
+}
+tax.df2[,8]
+
+#Manually change the 3 Dothidiomycetes that were misclassified
+miss.class <- c("OTU_33","OTU_46","OTU_97")
+for (i in 1:length(tax.df2[,8])){
+  if (rownames(tax.df2[i,]) %in% miss.class){
+    tax.df2[i,8] <- paste(rownames(tax.df2[i,]), "Phyllachora maydis")
+  }
+}
+
+#Put tax.df2 back into tarspot_fungi_filter_tar@tax_table
+tax.df2 <- as.matrix(tax.df2)
+tax.df2 <- tax_table(tax.df2)
+tarspot_fungi_filter_fish@tax_table <- tax.df2
+colnames(tarspot_fungi_filter_fish@tax_table) <- c("Kingdom",
+                                                  "Phylum",
+                                                  "Class",
+                                                  "Order",
+                                                  "Family",
+                                                  "Genus",
+                                                  "Species",
+                                                  "Taxonomy")
+```
+
+
+```{r}
+fish_speac <- spiec.easi(tarspot_fungi_filter_fish, 
+                         method='mb', 
+                         lambda.min.ratio=0.01,
+                         nlambda=30, 
+                         pulsar.params=list(rep.num=100))
+
+fish_net <- adj2igraph(getRefit(fish_speac),  vertex.attr=list(name=taxa_names(tarspot_fungi_filter_fish)))
+
+# Identify isolated nodes
+bad.vs<-V(fish_net)[degree(fish_net) == 0] 
+# Remove isolated nodes
+fish_net2<-delete.vertices(fish_net, bad.vs)
+
+plot_network(fish_net2, tarspot_fungi_filter_fish, type='taxa', color="Order", label="Taxonomy")
+
+edge_density(fish_net2, loops = FALSE)
+
+net.grph <- fish_net2
+
+# Hub detection
+net.cn <- closeness(net.grph)
+net.bn <- betweenness(net.grph) 
+net.pr <- page_rank(net.grph)$vector 
+net.hs <- hub_score(net.grph)$vector
+
+net.dg <- degree(net.grph)
+length(net.dg)
+hubs <- data.frame(hub_score(net.grph)$vector); colnames(hubs) <- c("hubscore")
+hubs$OTU <- rownames(hubs)
+hubs$betweeness <- net.bn
+hubs$pr <- net.pr
+hubs$degree <- net.dg
+hubs$closness <- net.cn
+hubs$eigen <- eigen_centrality(net.grph)$vector
+
+all.equal(hubs$hubscore, hubs$eigen) # they are the same
+
+# getting the mean relative abundance of each OTU
+myphy.site.year.relative <- tarspot_fungi_filter_tar %>%   
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  arrange(OTU)
+mean.rel.abund <- myphy.site.year.relative %>% 
+  group_by(OTU) %>% 
+  nest() %>%
+  mutate(mean.relabund = purrr::map(data,~mean(.$Abundance*100))) %>%
+  mutate(SE.relabund = purrr::map(data,~sd(.$Abundance*100)/sqrt(length(.$Abundance*100)))) %>%
+  unnest(mean.relabund, SE.relabund)
+
+nodes.stats <- hubs
+nodes.stats$mean.abundance <- mean.rel.abund$mean.relabund[match(nodes.stats$OTU, mean.rel.abund$OTU)]
+nodes.stats$Genus <- myphy.site.year.relative$Genus[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+nodes.stats$Order <- myphy.site.year.relative$Order[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+nodes.stats$Taxonomy <- myphy.site.year.relative$Taxonomy[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+nodes.stats$Label <- myphy.site.year.relative$Label[match(nodes.stats$OTU, myphy.site.year.relative$OTU)]
+
+# I am going to call our "hub-lines" or define our cutoffs based on https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.1002352
+mean.close <- mean(log10(nodes.stats$closness))
+sd.close <- sd(log10(nodes.stats$closness))
+hubline.close <- (mean.close + 1.282*sd.close)
+
+z.score.close = (hubline.close - mean.close)/sd.close
+pnorm(z.score.close) # line is above 95 % - equal to p = 0.05
+
+mean.degree <- mean(log10(nodes.stats$degree))
+sd.degree <- sd(log10(nodes.stats$degree))
+hubline.degree <- (mean.degree + 1.65*sd.degree)
+
+z.score.degree = (hubline.degree - mean.degree)/sd.degree
+pnorm(z.score.degree) # line is above 95 % - equal to p = 0.05
+
+mean.between <- mean(log10(nodes.stats$betweeness[nodes.stats$betweeness > 0]))
+sd.between <- sd(log10(nodes.stats$betweeness[nodes.stats$betweeness > 0]))
+hubline.between <- (mean.between + 1.65*sd.between)
+
+z.score.between = (hubline.between - mean.between)/sd.between
+pnorm(z.score.between) # line is above 95 % - equal to p = 0.05
+
+hist(log10(hubs$eigen + 0.0001)) # looks normal enough
+mean.eigen <- mean(log10(nodes.stats$eigen+0.0001))
+sd.eigen <- sd(log10(nodes.stats$eigen+0.0001))
+hubline.eigen <- (mean.eigen + 1.65*sd.eigen)
+
+z.score.eigen = (hubline.eigen - mean.eigen)/sd.eigen
+pnorm(z.score.eigen) # line is above 95 % - equal to p = 0.05
+
+between <- ggplot() + 
+  geom_point(data = nodes.stats, aes(size = mean.abundance, x = betweeness, y = degree), alpha = 0.6) +
+  scale_size_continuous(name = "Relative Abundance") +
+  theme_bw() + 
+  geom_text_repel(data = subset(nodes.stats, betweeness > 10^hubline.between & degree > 10^hubline.degree), aes(x = betweeness, y = degree, label = Taxonomy)) +
+  geom_text_repel(data = subset(nodes.stats, betweeness > 10^hubline.between & degree < 10^hubline.degree), aes(x = betweeness, y = degree, label = Taxonomy)) +
+  xlab("Betweeness Centrality") + 
+  ylab("Degree") +
+  geom_vline(xintercept = 10^hubline.between) + 
+  geom_hline(yintercept = 10^hubline.degree)
+
+# the cutoff with hubscore was just arbitrary since we dont really have a correct distribution. 
+# the cutoff with hubscore was just arbitrary since we dont really have a correct distribution. 
+hubscore <- ggplot() + 
+  geom_point(data = nodes.stats, aes(size = mean.abundance, x = hubscore, y = degree), alpha = 0.6) +
+  scale_size_continuous(name = "Relative Abundance") +
+  theme_bw() + 
+  geom_text_repel(data = subset(nodes.stats, eigen > 10^hubline.eigen & degree > 10^hubline.degree), aes(x = eigen, y = degree, label = Taxonomy)) +
+  geom_text_repel(data = subset(nodes.stats, eigen > 10^hubline.eigen & degree < 10^hubline.degree), aes(x = eigen, y = degree, label = Taxonomy)) +
+  xlab("Eigenvector Centrality") + 
+  ylab("Degree") +
+  geom_vline(xintercept = 10^hubline.eigen) + 
+  geom_hline(yintercept = 10^hubline.degree)
+# call hubs based on OTUs with high between centrality and high hubscores. 
+
+plot_grid(between, hubscore, labels = "AUTO", nrow = 2)
+
+# Get clusters
+wt <- walktrap.community(net.grph)
+# Calculate modularity
+modu <- modularity(net.grph, membership(wt))
+
+components(net.grph, mode = c("strong"))
+```
+
+Export the network to cytoscape using RCy3 - Note* cytoscape has to be open on your computer for this to work 
+```{r}
+net.grph <- fish_net2
+#createNetworkFromIgraph(net.grph,"fish_net")
+```
+
+export the edge and node statistics to a csv to then import into cytoscape 
+```{r}
+#Node stats - import this first.
+write.csv(nodes.stats, "/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/Network\ Analysis/NodeStats_fish_net.csv")
+```
+
+Calculate edge weight == higher absolute value = stronger co-occurance
+```{r}
+### add pos-neg to table
+betaMat=as.matrix(symBeta(getOptBeta(fish_speac)))
+otu.ids=colnames(fish_speac$est$data)
+edges=E(net.grph)
+edge.stats <- NULL
+for(e.index in 1:length(edges)){
+  adj.nodes=ends(net.grph,edges[e.index])
+  xindex=which(otu.ids==adj.nodes[1])
+  yindex=which(otu.ids==adj.nodes[2])
+  beta=betaMat[xindex,yindex]
+  wt_i <- cbind.data.frame(adj.nodes, beta)
+  colnames(wt_i) <- c("source", "target", "beta")
+  edge.stats <- rbind.data.frame(wt_i, edge.stats)
+}
+
+edge.stats$direction <- ifelse(edge.stats$beta > 0, "Positive", "Negative")
+edge.stats$shared.name <- paste(edge.stats$source, "(interacts with)", edge.stats$target)
+edge.stats$abs.beta <- abs(edge.stats$beta)
+prop.edges.fish <- edge.stats %>%
+  group_by(direction) %>%
+  summarise(counts = n()) %>%
+  select(direction, counts)
+prop.edges.fish$prop <- 100*prop.edges.fish$counts/sum(prop.edges.fish$counts)
+prop.edges.fish$category <- "Fish eye"
+```
+
+```{r}
+rbind.data.frame(prop.edges.fish, prop.edges.tar) %>%
+ggplot(.,aes(x = category, y = prop, fill = direction)) +
+  geom_bar(stat = "identity", position = position_stack()) + 
+  scale_fill_npg() +
+  xlab("") +
+  ylab("Percent of Edges") + 
+  theme(legend.position="top") +
+  theme(legend.title=element_blank()) 
+```
+
+Write edge stats to a file
+```{r}
+#Node stats - import this first.
+write.csv(edge.stats, "/Users/rothmitc/odrive/MSU\ Google\ Drive/MSU/Classes/PLP\ 847\ Advanced\ Mycology/Group\ Project/Network\ Analysis/EdgeStats_fish_net.csv")
+```
